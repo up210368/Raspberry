@@ -1,0 +1,10 @@
+sudo apt install -y moby-engine moby-cli
+
+curl -L https://packages.microsoft.com/config/debian/$(lsb_release -cs)/prod.list > ./microsoft-prod.list
+sudo cp ./microsoft-prod.list /etc/apt/sources.list.d/
+sudo apt update
+sudo apt install aziot-edge -y
+
+sudo nano /etc/aziot/config.toml
+
+HostName=fiera-care-app-IoThub.azure-devices.net;DeviceId=raspberry-edge;SharedAccessKey=t/geeiHjkQYEzjf9tkmfGRdDNGpvrWQw/8PSnB0EzN4=
