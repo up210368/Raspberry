@@ -1,4 +1,6 @@
 import os
+import cv2
+import threading
 from dotenv import load_dotenv
 import time
 import subprocess
@@ -12,6 +14,75 @@ from watchdog.events import FileSystemEventHandler
 
 # Cargar variables de entorno
 load_dotenv()
+
+RTSP_PORT = os.getenv("RTSP_PORT")
+RTSP_STREAM_NAME = "fiera-live"
+RASP_IP = os.getenv("RASP_IP")
+RTSP_URL = f"rtsp://{RASP_IP}:{RTSP_PORT}/{RTSP_STREAM_NAME}"
+rtsp_thread = None
+def start_rtsp_stream():
+    """
+    Captura video desde la cámara y transmite a través de un servidor RTSP.
+    """
+    try:
+        print("Iniciando transmisión RTSP...")
+
+        # Capturar video de la cámara (ID 0)
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            raise Exception("No se pudo acceder a la cámara.")
+
+        # Parámetros de la cámara
+        width, height, fps = 640, 480, 30
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        cap.set(cv2.CAP_PROP_FPS, fps)
+
+        # Configurar el servidor RTSP con ffmpeg
+        rtsp_command = (
+            f"ffmpeg -re -f rawvideo -pix_fmt bgr24 -s {width}x{height} "
+            f"-r {fps} -i pipe:0 -c:v libx264 -preset ultrafast -tune zerolatency "
+            f"-f rtsp rtsp://{RASP_IP}:{RTSP_PORT}/{RTSP_STREAM_NAME}"
+        )
+
+        process = subprocess.Popen(rtsp_command, shell=True, stdin=subprocess.PIPE)
+
+        while True:
+            # Leer fotogramas de la cámara
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Escribir fotogramas al proceso de ffmpeg
+            process.stdin.write(frame.tobytes())
+
+    except Exception as e:
+        print(f"Error al iniciar la transmisión RTSP: {e}")
+    finally:
+        cap.release()
+        process.stdin.close()
+        process.terminate()
+
+def notify_iothub_about_stream():
+    """
+    Notifica a Azure IoT Hub sobre la disponibilidad del stream RTSP.
+    """
+    try:
+        message = Message(f'{{"RTSP_URL": "{RTSP_URL}"}}')
+        iot_client.send_message(message)
+        print(f"Notificación enviada a IoT Hub: {RTSP_URL}")
+    except Exception as e:
+        print(f"Error al notificar a IoT Hub: {e}")
+
+def stop_rtsp_stream():
+    """
+    Detiene el servidor RTSP.
+    """
+    try:
+        print("Deteniendo transmisión RTSP...")
+        subprocess.run(["pkill", "-f", "libcamera-vid"], check=True)
+    except Exception as e:
+        print(f"Error al detener la transmisión RTSP: {e}")
 
 # Inicializar el sensor DHT11 y el pin de sonido
 KY_015 = adafruit_dht.DHT11(board.D4)
@@ -107,22 +178,32 @@ observer.start()
 try:
     while True:
         temp, hum = capture_dht()
+        sonido = gpio.input(SOUND_PIN)
         if temp is not None and hum is not None:
             print(f"Temperatura: {temp}°C, Humedad: {hum}%")
             send_to_iothub(temp, hum)
 
-        if gpio.input(SOUND_PIN):
+        if sonido == 1:
             print("Sonido detectado")
+            if rtsp_thread is None or not rtsp_thread.is_alive():
+                rtsp_thread = threading.Thread(target=start_rtsp_stream, daemon=True)
+                rtsp_thread.start()
+                notify_iothub_about_stream()
         else:
             print("Silencio")
         
+        time.sleep(50)
         capture_photo()
-        time.sleep(5)
+        time.sleep(2)
         capture_video(15)
         time.sleep(30)
 except KeyboardInterrupt:
     print("Interrumpido por el usuario.")
+    if rtsp_thread and rtsp_thread.is_alive():
+        pass
+    stop_rtsp_stream()
 finally:
     gpio.cleanup()
+    stop_rtsp_stream()
     observer.stop()
     observer.join()
