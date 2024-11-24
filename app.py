@@ -1,6 +1,8 @@
 import os
 import cv2
 import threading
+from flask import Flask, Response
+from picamera2 import Picamera2
 from dotenv import load_dotenv
 import time
 import subprocess
@@ -15,21 +17,19 @@ from watchdog.events import FileSystemEventHandler
 # Cargar variables de entorno
 load_dotenv()
 
-def notify_iothub_about_stream():
-    """
-    Notifica a Azure IoT Hub sobre la disponibilidad del stream RTSP.
-    """
-    try:
-        message = Message(f'{{"RTSP_URL": "{RTSP_URL}"}}')
-        iot_client.send_message(message)
-        print(f"Notificación enviada a IoT Hub: {RTSP_URL}")
-    except Exception as e:
-        print(f"Error al notificar a IoT Hub: {e}")
+stream_ip = os.getenv("RASP_IP")
+stream_port = os.getenv("STREAM_PORT") 
+stream_url = (f"https://{stream_ip}:{stream_port}/video")
+app = Flask(__name__) #Cargar aplicación de flask
 
-def stop_rtsp_stream():
-    """
-    Detiene el servidor RTSP.
-    """
+# Variable para controlar el estado del stream Flask
+is_streaming = False
+flask_thread = None
+
+# Configurar la cámara
+picam2 = Picamera2()
+picam2.configure(picam2.create_video_configuration(main={"size": (640, 480)}))
+picam2.start()
 
 # Inicializar el sensor DHT11 y el pin de sonido
 KY_015 = adafruit_dht.DHT11(board.D4)
@@ -50,6 +50,28 @@ os.makedirs(monitored_folder, exist_ok=True)
 photo_container = "fotos"
 video_container = "videos"
 
+# Función para notificar sobre el stream
+def notify_iothub_about_stream(stream_url):
+    try:
+        message = Message(f'{{"RTSP_URL": "{stream_url}"}}')
+        iot_client.send_message(message)
+        print(f"Notificación enviada a IoT Hub: {stream_url}")
+    except Exception as e:
+        print(f"Error al notificar a IoT Hub: {e}")
+
+# Transmisión MJPEG en Flask
+def generate_frames():
+    while True:
+        frame = picam2.capture_array()
+        _, buffer = cv2.imencode('.jpg', frame)
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+        
+@app.route('/stream')
+def video():
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
 # Función para subir archivos
 def upload_to_blob(file_path, container_name):
     file_name = os.path.basename(file_path)
@@ -61,15 +83,6 @@ def upload_to_blob(file_path, container_name):
         os.remove(file_path)
     except Exception as e:
         print(f"Error al subir archivo '{file_name}': {e}")
-
-# Clase para manejar eventos de archivo
-class FileHandler(FileSystemEventHandler):
-    def on_created(self, event):
-        if event.is_directory:
-            return
-        file_path = event.src_path
-        if file_path.endswith(('.jpg', '.jpeg', '.png')):
-            upload_to_blob(file_path, photo_container)
 
 # Captura de fotos
 def capture_photo():
@@ -115,11 +128,36 @@ def send_to_iothub(temperature, humidity):
     except Exception as e:
         print(f"Error al enviar mensaje a IoT Hub: {e}")
 
+# Clase para manejar eventos de archivo
+class FileHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        file_path = event.src_path
+        if file_path.endswith(('.jpg', '.jpeg', '.png')):
+            upload_to_blob(file_path, photo_container)
+
 # Configuración de observador de archivos
 event_handler = FileHandler()
 observer = Observer()
 observer.schedule(event_handler, monitored_folder, recursive=False)
 observer.start()
+
+def start_flask_stream():
+    global is_streaming, flask_thread
+    if not is_streaming:
+        flask_thread = threading.Thread(target=app.run, kwargs={"host": "0.0.0.0", "port": 5004, "threaded": True}, daemon=True)
+        flask_thread.start()
+        is_streaming = True
+        print("Stream Flask iniciado.")
+
+def stop_flask_stream():
+    global is_streaming, flask_thread
+    if is_streaming and flask_thread:
+        # Detener Flask programáticamente requiere finalizar el hilo o usar un enfoque alternativo.
+        # Una opción básica es usar `os._exit(0)` para salir por completo, pero puede no ser ideal en producción.
+        is_streaming = False
+        print("Stream Flask detenido.")
 
 # Bucle principal
 try:
@@ -132,12 +170,11 @@ try:
 
         if sonido == 1:
             print("Sonido detectado")
-            if rtsp_thread is None or not rtsp_thread.is_alive():
-                rtsp_thread = threading.Thread(target=start_rtsp_stream, daemon=True)
-                rtsp_thread.start()
-                notify_iothub_about_stream()
+            start_flask_stream()
+            notify_iothub_about_stream("http://<your_ip>:5004/video")  # Cambia <your_ip> por la IP de tu dispositivo
         else:
             print("Silencio")
+            stop_flask_stream()
         
         time.sleep(50)
         capture_photo()
@@ -146,11 +183,8 @@ try:
         time.sleep(30)
 except KeyboardInterrupt:
     print("Interrumpido por el usuario.")
-    if rtsp_thread and rtsp_thread.is_alive():
-        pass
-    stop_rtsp_stream()
+    stop_flask_stream()
 finally:
     gpio.cleanup()
-    stop_rtsp_stream()
     observer.stop()
     observer.join()
