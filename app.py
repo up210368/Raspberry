@@ -15,54 +15,6 @@ from watchdog.events import FileSystemEventHandler
 # Cargar variables de entorno
 load_dotenv()
 
-RTSP_PORT = os.getenv("RTSP_PORT")
-RTSP_STREAM_NAME = "fiera-live"
-RASP_IP = os.getenv("RASP_IP")
-RTSP_URL = f"rtsp://{RASP_IP}:{RTSP_PORT}/{RTSP_STREAM_NAME}"
-rtsp_thread = None
-def start_rtsp_stream():
-    """
-    Captura video desde la cámara y transmite a través de un servidor RTSP.
-    """
-    try:
-        print("Iniciando transmisión RTSP...")
-
-        # Capturar video de la cámara (ID 0)
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            raise Exception("No se pudo acceder a la cámara.")
-
-        # Parámetros de la cámara
-        width, height, fps = 640, 480, 30
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        cap.set(cv2.CAP_PROP_FPS, fps)
-
-        # Configurar el servidor RTSP con ffmpeg
-        rtsp_command = (
-            f"ffmpeg -re -f rawvideo -pix_fmt bgr24 -s {width}x{height} "
-            f"-r {fps} -i pipe:0 -c:v libx264 -preset ultrafast -tune zerolatency "
-            f"-f rtsp rtsp://{RASP_IP}:{RTSP_PORT}/{RTSP_STREAM_NAME}"
-        )
-
-        process = subprocess.Popen(rtsp_command, shell=True, stdin=subprocess.PIPE)
-
-        while True:
-            # Leer fotogramas de la cámara
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            # Escribir fotogramas al proceso de ffmpeg
-            process.stdin.write(frame.tobytes())
-
-    except Exception as e:
-        print(f"Error al iniciar la transmisión RTSP: {e}")
-    finally:
-        cap.release()
-        process.stdin.close()
-        process.terminate()
-
 def notify_iothub_about_stream():
     """
     Notifica a Azure IoT Hub sobre la disponibilidad del stream RTSP.
@@ -78,11 +30,6 @@ def stop_rtsp_stream():
     """
     Detiene el servidor RTSP.
     """
-    try:
-        print("Deteniendo transmisión RTSP...")
-        subprocess.run(["pkill", "-f", "libcamera-vid"], check=True)
-    except Exception as e:
-        print(f"Error al detener la transmisión RTSP: {e}")
 
 # Inicializar el sensor DHT11 y el pin de sonido
 KY_015 = adafruit_dht.DHT11(board.D4)

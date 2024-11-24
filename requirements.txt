@@ -22,7 +22,9 @@ idna==3.10
 isodate==0.7.2
 janus==1.1.0
 msrest==0.7.1
+numpy==2.0.2
 oauthlib==3.2.2
+opencv-python==4.10.0.84
 packaging==24.2
 paho-mqtt==1.6.1
 pycparser==2.22
@@ -38,7 +40,7 @@ rpi-ws281x==5.0.0
 RPi.GPIO==0.7.1
 six==1.16.0
 sysv-ipc==1.1.0
-typing_extensions==4.12.2
+typing-extensions==4.12.2
 uamqp==1.6.11
 urllib3==2.2.3
 watchdog==6.0.0
