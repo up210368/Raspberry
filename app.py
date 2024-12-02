@@ -19,7 +19,15 @@ load_dotenv()
 
 stream_ip = os.getenv("RASP_IP")
 stream_port = os.getenv("STREAM_PORT") 
-stream_url = (f"https://{stream_ip}:{stream_port}/video")
+stream_url = (f"https://{stream_ip}:{stream_port}/stream")
+
+# Configurar conexiones a Azure
+connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+iot_connection_string = os.getenv("AZURE_IOT_CONNECTION_STRING")
+blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+iot_client = IoTHubDeviceClient.create_from_connection_string(iot_connection_string)
+MSG_TEMPLATE = '{{"Temperatura": {temperature}, "Humedad": {humidity}}}'
+
 app = Flask(__name__) #Cargar aplicación de flask
 
 # Variable para controlar el estado del stream Flask
@@ -37,13 +45,6 @@ SOUND_PIN = 17
 gpio.setmode(gpio.BCM)
 gpio.setup(SOUND_PIN, gpio.IN)
 
-# Configurar conexiones a Azure
-connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-iot_connection_string = os.getenv("AZURE_IOT_CONNECTION_STRING")
-blob_service_client = BlobServiceClient.from_connection_string(connection_string)
-iot_client = IoTHubDeviceClient.create_from_connection_string(iot_connection_string)
-MSG_TEMPLATE = '{{"Temperatura": {temperature}, "Humedad": {humidity}}}'
-
 # Configuración de carpetas y contenedores
 monitored_folder = os.path.join(os.path.dirname(__file__), "media")
 os.makedirs(monitored_folder, exist_ok=True)
@@ -53,24 +54,27 @@ video_container = "videos"
 # Función para notificar sobre el stream
 def notify_iothub_about_stream(stream_url):
     try:
-        message = Message(f'{{"RTSP_URL": "{stream_url}"}}')
+        iot_client.connect()
+        message = Message(f'{{"stream_URL": "{stream_url}"}}')
         iot_client.send_message(message)
         print(f"Notificación enviada a IoT Hub: {stream_url}")
     except Exception as e:
         print(f"Error al notificar a IoT Hub: {e}")
+        if hasattr(e, 'details'):
+            print(f"Detalles del error: {e.details}")
 
 # Transmisión MJPEG en Flask
 def generate_frames():
     while True:
         frame = picam2.capture_array()
-        _, buffer = cv2.imencode('.jpg', frame)
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        _, buffer = cv2.imencode('.jpg', frame_bgr)
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
         
 @app.route('/stream')
 def video():
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
 
 # Función para subir archivos
 def upload_to_blob(file_path, container_name):
@@ -104,7 +108,7 @@ def capture_video(duration):
         subprocess.run(f"ffmpeg -i {h264_path} -c:v libx264 -preset fast -crf 22 {video_path}", shell=True, check=True)
         os.remove(h264_path)
         print(f"Video convertido: {video_path}")
-        time.sleep(7)
+        time.sleep(5)
         upload_to_blob(video_path, video_container)
     except Exception as e:
         print(f"Error al capturar video: {e}")
@@ -125,6 +129,14 @@ def send_to_iothub(temperature, humidity):
         msg_formatted = MSG_TEMPLATE.format(temperature=temperature, humidity=humidity)
         iot_client.send_message(Message(msg_formatted))
         print(f"Mensaje enviado: {msg_formatted}")
+    except Exception as e:
+        print(f"Error al enviar mensaje a IoT Hub: {e}")
+
+def send_to_iothubsound(msg):
+    try:
+        msg = format(msg)
+        iot_client.send_message(Message(msg))
+        print(f"Mensaje enviado: {msg}")
     except Exception as e:
         print(f"Error al enviar mensaje a IoT Hub: {e}")
 
@@ -151,14 +163,6 @@ def start_flask_stream():
         is_streaming = True
         print("Stream Flask iniciado.")
 
-def stop_flask_stream():
-    global is_streaming, flask_thread
-    if is_streaming and flask_thread:
-        # Detener Flask programáticamente requiere finalizar el hilo o usar un enfoque alternativo.
-        # Una opción básica es usar `os._exit(0)` para salir por completo, pero puede no ser ideal en producción.
-        is_streaming = False
-        print("Stream Flask detenido.")
-
 # Bucle principal
 try:
     while True:
@@ -166,24 +170,22 @@ try:
         sonido = gpio.input(SOUND_PIN)
         if temp is not None and hum is not None:
             print(f"Temperatura: {temp}°C, Humedad: {hum}%")
-            send_to_iothub(temp, hum)
+            if temp > 28:
+                send_to_iothub(temp, hum)
 
         if sonido == 1:
-            print("Sonido detectado")
-            start_flask_stream()
-            notify_iothub_about_stream("http://<your_ip>:5004/video")  # Cambia <your_ip> por la IP de tu dispositivo
+            msg = "Sonido detectado"
+            send_to_iothubsound(msg)
         else:
             print("Silencio")
-            stop_flask_stream()
         
-        time.sleep(50)
-        capture_photo()
-        time.sleep(2)
-        capture_video(15)
-        time.sleep(30)
+        if not is_streaming:
+            start_flask_stream()
+            notify_iothub_about_stream(stream_url)
+        time.sleep(5)
 except KeyboardInterrupt:
     print("Interrumpido por el usuario.")
-    stop_flask_stream()
+    gpio.cleanup()
 finally:
     gpio.cleanup()
     observer.stop()
